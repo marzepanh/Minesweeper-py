@@ -1,6 +1,27 @@
 import pygame
 import random
 import time
+import os
+import sqlite3
+import datetime
+import tkinter as tk
+from tkinter import ttk
+import pandas as pd
+from solver import MinesweeperSolver
+
+# Инициализация микшера
+pygame.mixer.init()
+
+# Путь к папке со звуками
+base_path = os.path.dirname(__file__)
+sound_path = lambda name: os.path.join(base_path, 'res/sounds', name)
+
+# Загрузка звуков
+click_sound = pygame.mixer.Sound(sound_path('click.wav'))
+win_sound = pygame.mixer.Sound(sound_path('win.wav'))
+boom_sound = pygame.mixer.Sound(sound_path('lose.wav'))
+button_sound = pygame.mixer.Sound(sound_path('button.wav'))
+flag_sound = pygame.mixer.Sound(sound_path('flag.wav'))
 
 # Состояния клеток
 CELL_STATES = ['closed', 'opened', 'flagged', 'bombed', 'nobomb']
@@ -73,7 +94,7 @@ class Board:
 
 
 class Game:
-    def __init__(self, cols, rows, bombs_amount):
+    def __init__(self, cols, rows, bombs_amount, difficulty):
         self.board = Board(cols, rows, bombs_amount)
         self.cols = cols
         self.rows = rows
@@ -83,6 +104,8 @@ class Game:
         self.start_time = None
         self.elapsed_time = 0
         self.first_click_done = False
+        self.result_saved = False
+        self.difficulty = difficulty
 
     def reveal(self, x, y):
         if not self.board.in_range(x, y):
@@ -96,10 +119,17 @@ class Game:
         self.closed_cells -= 1
 
         if self.board.hidden_board[y][x] == -1:
+            boom_sound.play()
             self.state = 'lose'
             self.elapsed_time = time.time() - self.start_time  # фиксируем время при проигрыше
             self.reveal_all_cells()
+            if not self.result_saved:
+                save_game_result(self.difficulty, 'lose', self.elapsed_time)
+                print(f"[LOG] Saved result: {self.difficulty}, {self.state}, {self.elapsed_time}")
+                self.result_saved = True
             return
+
+        click_sound.play()  # 🔈 Воспроизведение звука открытия
 
         if self.board.hidden_board[y][x] == 0:
             for i in range(x - 1, x + 2):
@@ -151,6 +181,7 @@ class Game:
     def on_right_click(self, x, y):
         if self.state != 'playing':
             return
+        flag_sound.play()
         state = self.board.visible_board[y][x]
         if state == CELL_STATES.index('closed'):
             if self.flags < self.board.bombs_amount:
@@ -165,6 +196,11 @@ class Game:
             self.state = 'win'
             self.elapsed_time = time.time() - self.start_time
             self.reveal_all_cells()
+            win_sound.play()  # 🔈 Звук победы
+            if not self.result_saved:
+                save_game_result(self.difficulty, 'win', self.elapsed_time)
+                print(f"[LOG] Saved result: {self.difficulty}, {self.state}, {self.elapsed_time}")
+                self.result_saved = True
 
 
 def draw_board(screen, game, images):
@@ -189,8 +225,9 @@ def draw_board(screen, game, images):
                     screen.blit(images[f'num{num}'], rect)
 
 
-def draw_ui(screen, font, flags, bombs, timer, width, height, reset_imgs, game_state):
-    panel_top = height - UI_PANEL_HEIGHT - 50 + 5  # 50 — высота блока с кнопкой "Сложность"
+def draw_ui(screen, font, flags, bombs, timer, width, height, reset_imgs, game_state, rows):
+    panel_top = rows * CELL_SIZE + 5  # UI прямо под игровым полем
+
     panel_left = 10
     panel_right = width - 10
 
@@ -270,12 +307,72 @@ def difficulty_menu(screen, font):
                 mx, my = event.pos
                 for level, rect in buttons:
                     if rect.collidepoint(mx, my):
+                        button_sound.play()
                         selected = level
                         menu_running = False
-    return DIFFICULTIES[selected]
+    return selected, DIFFICULTIES[selected]
 
 
-# ... твой код без изменений до main() ...
+def save_game_result(difficulty, result, duration):
+    conn = sqlite3.connect("minesweeper_stats.db")
+    cursor = conn.cursor()
+
+    now = datetime.datetime.now().isoformat()
+    cursor.execute('''
+                   INSERT INTO game_stats (date, difficulty, result, duration)
+                   VALUES (?, ?, ?, ?)
+                   ''', (now, difficulty, result, duration))
+
+    conn.commit()
+    conn.close()
+
+import threading
+
+def show_statistics_window():
+    def run_stats_window():
+        stats_window = tk.Tk()  # Было Toplevel(), но Toplevel требует уже активного Tk
+        stats_window.title("🏆 Статистика лучших результатов")
+        stats_window.geometry("500x500")
+
+        conn = sqlite3.connect("minesweeper_stats.db")
+
+        difficulties = ['Легко', 'Средне', 'Сложно']
+        titles = {'Легко': 'Легкий', 'Средне': 'Средний', 'Сложно': 'Сложный'}
+
+        for i, difficulty in enumerate(difficulties):
+            label = tk.Label(stats_window, text=f"🏅 {titles[difficulty]}", font=("Arial", 12, "bold"))
+            label.pack(pady=(10 if i == 0 else 5, 0))
+
+            df = pd.read_sql_query(f'''
+                SELECT date, duration FROM game_stats
+                WHERE result = "win" AND difficulty = ?
+                ORDER BY duration ASC
+                LIMIT 5
+            ''', conn, params=(difficulty,))
+
+
+
+            tree = ttk.Treeview(stats_window, columns=("date", "duration"), show="headings", height=5)
+            tree.heading("date", text="Дата")
+            tree.heading("duration", text="Время (сек)")
+
+            if df.empty:
+                print(f"Нет данных для сложности {difficulty}")
+            else:
+                for _, row in df.iterrows():
+                    tree.insert("", "end", values=(row["date"], round(row["duration"], 2)))
+
+            tree.pack(pady=5)
+
+        conn.close()
+        stats_window.mainloop()  # ОБЯЗАТЕЛЬНО!
+
+
+    # Запускаем окно статистики в отдельном потоке, чтобы не блокировать pygame
+    threading.Thread(target=run_stats_window, daemon=True).start()
+
+
+
 
 def main():
     pygame.init()
@@ -284,11 +381,11 @@ def main():
 
     # Начальный выбор сложности
     screen = pygame.display.set_mode((400, 300))
-    cols, rows, bombs = difficulty_menu(screen, font)
+    difficulty_str, (cols, rows, bombs) = difficulty_menu(screen, font)
 
     width = cols * CELL_SIZE
-    DIFFICULTY_BUTTON_HEIGHT = 50
-    height = rows * CELL_SIZE + UI_PANEL_HEIGHT + DIFFICULTY_BUTTON_HEIGHT
+    difficulty_button_height = 50
+    height = rows * CELL_SIZE + UI_PANEL_HEIGHT + difficulty_button_height + 50
     screen = pygame.display.set_mode((width, height))
     pygame.display.set_caption('Сапёр')
 
@@ -314,7 +411,7 @@ def main():
             print(f"[ERROR] Failed to load reset image {path}: {e}")
             reset_imgs[state_name] = pygame.Surface((40, 40))  # Заглушка
 
-    game = Game(cols, rows, bombs)
+    game = Game(cols, rows, bombs, difficulty_str)
     clock = pygame.time.Clock()
 
     running = True
@@ -331,7 +428,7 @@ def main():
         draw_board(screen, game, images)
 
         # Отрисовка UI (счётчик бомб, кнопка reset, таймер)
-        reset_rect = draw_ui(screen, font, game.flags, bombs, timer, width, height, reset_imgs, game.state)
+        reset_rect = draw_ui(screen, font, game.flags, bombs, timer, width, height, reset_imgs, game.state, game.rows)
 
         # Кнопка "Сложность"
         difficulty_button_x = 10
@@ -350,6 +447,46 @@ def main():
         pygame.draw.rect(screen, BLUE, button_rect, border_radius=5)
         screen.blit(btn_surf, btn_rect)
 
+        # Кнопка "Статистика"
+        stats_text = "Stats"
+        stats_surf = font.render(stats_text, True, WHITE)
+        stats_rect = stats_surf.get_rect()
+
+        # Позиционируем кнопку от правого края
+        button_padding_x = 10  # тот же padding
+        button_padding_y = 5
+        stats_button_width = stats_rect.width + 2 * button_padding_x
+        stats_button_height = stats_rect.height + 2 * button_padding_y
+        stats_button_x = screen.get_width() - stats_button_width - 10  # 10 px отступ от правого края
+        stats_button_y = difficulty_button_y  # на том же уровне
+
+        stats_rect.topleft = (stats_button_x + button_padding_x, stats_button_y + button_padding_y)
+        stats_button_rect = pygame.Rect(stats_button_x,
+                                        stats_button_y,
+                                        stats_button_width,
+                                        stats_button_height)
+        pygame.draw.rect(screen, BLUE, stats_button_rect, border_radius=5)
+        screen.blit(stats_surf, stats_rect)
+
+        # ---- Добавляем кнопку "Решить" ----
+
+        solve_text = "Solve"
+        solve_surf = font.render(solve_text, True, WHITE)
+        solve_rect = solve_surf.get_rect()
+
+        solve_button_width = solve_rect.width + 2 * button_padding_x
+        solve_button_height = solve_rect.height + 2 * button_padding_y
+
+        # Располагаем под кнопкой "Статистика" с отступом 10 пикселей по вертикали
+        solve_button_x = stats_button_x
+        solve_button_y = stats_button_y + stats_button_height + 10
+
+        solve_rect.topleft = (solve_button_x + button_padding_x, solve_button_y + button_padding_y)
+        solve_button_rect = pygame.Rect(solve_button_x, solve_button_y, solve_button_width, solve_button_height)
+
+        pygame.draw.rect(screen, BLUE, solve_button_rect, border_radius=5)
+        screen.blit(solve_surf, solve_rect)
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -358,16 +495,36 @@ def main():
                 mx, my = event.pos
 
                 if reset_rect.collidepoint(mx, my):
-                    game = Game(cols, rows, bombs)
+                    button_sound.play()
+                    game = Game(cols, rows, bombs, difficulty_str)
+                    continue
+
+                if stats_rect.collidepoint(mx, my):
+                    button_sound.play()
+                    show_statistics_window()
+                    continue
+
+                if solve_rect.collidepoint(mx, my):
+                    button_sound.play()
+                    solver = MinesweeperSolver(game.board.visible_board, game.board.hidden_board)
+                    actions = solver.solve_step()
+
+                    for action, x, y in actions:
+
+                        if action == 'open':
+                            game.on_left_click(x, y)
+                        elif action == 'flag':
+                            game.on_right_click(x, y)
                     continue
 
                 if button_rect.collidepoint(mx, my):
+                    button_sound.play()  # 🔈 Воспроизведение звука при нажатии на "Сложность"
                     # Открываем меню выбора сложности и обновляем игру и окно
-                    cols, rows, bombs = difficulty_menu(screen, font)
+                    difficulty_str, (cols, rows, bombs) = difficulty_menu(screen, font)
                     width = cols * CELL_SIZE
-                    height = rows * CELL_SIZE + UI_PANEL_HEIGHT + DIFFICULTY_BUTTON_HEIGHT
+                    height = rows * CELL_SIZE + UI_PANEL_HEIGHT + difficulty_button_height + 50
                     screen = pygame.display.set_mode((width, height))
-                    game = Game(cols, rows, bombs)
+                    game = Game(cols, rows, bombs, difficulty_str)
                     continue
 
                 if my < rows * CELL_SIZE:
