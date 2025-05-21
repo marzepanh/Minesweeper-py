@@ -278,7 +278,7 @@ def difficulty_menu(screen, font):
     menu_running = True
     selected = None
     width, height = 600, 400
-    screen = pygame.display.set_mode((width, height))
+    #screen = pygame.display.set_mode((width, height))
     button_width = 200
     button_height = 60
     gap = 20
